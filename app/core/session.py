@@ -1,19 +1,68 @@
-import json
+import os
 import time
+import json
+import hashlib
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any, List, Callable, Tuple
 
-from app.config import SESSION_FILE
+from app.config import DATA_DIR
 
-class SessionManager:
+POOL_FILE = DATA_DIR / "session_pool.json"
+MAX_POOL_SIZE = int(os.getenv("MAX_SESSIONS", "10"))
+
+class SessionEntry:
+    def __init__(
+        self,
+        session_id: str,
+        conv_id: str,
+        parent_message_id: Optional[int] = None,
+        created_at: Optional[float] = None,
+        last_active: Optional[float] = None,
+        turn_count: int = 1
+    ):
+        self.session_id = session_id
+        self.conv_id = conv_id
+        self.parent_message_id = parent_message_id
+        self.created_at = created_at or time.time()
+        self.last_active = last_active or time.time()
+        self.turn_count = turn_count
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "conv_id": self.conv_id,
+            "parent_message_id": self.parent_message_id,
+            "created_at": self.created_at,
+            "last_active": self.last_active,
+            "turn_count": self.turn_count
+        }
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "SessionEntry":
+        return cls(
+            session_id=d["session_id"],
+            conv_id=d["conv_id"],
+            parent_message_id=d.get("parent_message_id"),
+            created_at=d.get("created_at"),
+            last_active=d.get("last_active"),
+            turn_count=d.get("turn_count", 1)
+        )
+
+
+class SmartSessionPool:
     """
-    Maintains a sticky active chat session on DeepSeek web.
-    All consecutive requests continue in the same thread until explicitly reset.
+    Intelligent LRU Session Pool for Upstream Conversational Accounts.
+    
+    Features:
+    1. Multi-tenant conversation isolation (no cross-talk between different scripts/users).
+    2. Automatic continuity for multi-turn chats via Conversation Fingerprinting.
+    3. Strict bounded size (MAX_POOL_SIZE) with automatic upstream deletion of LRU sessions
+       so the upstream web sidebar never fills with spam.
     """
-    def __init__(self, file_path: Path = SESSION_FILE):
+    def __init__(self, file_path: Path = POOL_FILE, max_size: int = MAX_POOL_SIZE):
         self.file_path = Path(file_path)
-        self.session_id: Optional[str] = None
-        self.parent_message_id: Optional[int] = None
+        self.max_size = max(1, max_size)
+        self.pool: Dict[str, SessionEntry] = {}  # conv_id -> SessionEntry
         self.load()
 
     def load(self):
@@ -21,33 +70,111 @@ class SessionManager:
             try:
                 with open(self.file_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    self.session_id = data.get("session_id")
-                    self.parent_message_id = data.get("parent_message_id")
+                    for k, v in data.items():
+                        self.pool[k] = SessionEntry.from_dict(v)
             except Exception as e:
-                print(f"[SessionManager] Warning: failed to load session file: {e}")
+                print(f"[SessionPool] Warning: Failed to load pool file: {e}")
 
     def save(self):
         try:
             self.file_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = self.file_path.with_suffix(".tmp")
             with open(tmp_path, "w", encoding="utf-8") as f:
-                json.dump({
-                    "session_id": self.session_id,
-                    "parent_message_id": self.parent_message_id,
-                    "updated_at": time.time()
-                }, f, indent=2)
+                json.dump({k: v.to_dict() for k, v in self.pool.items()}, f, indent=2)
             tmp_path.replace(self.file_path)
         except Exception as e:
-            print(f"[SessionManager] Warning: failed to save session file: {e}")
+            print(f"[SessionPool] Warning: Failed to save pool file: {e}")
 
-    def reset(self, new_id: str):
-        self.session_id = new_id
-        self.parent_message_id = None
+    def compute_conv_id(
+        self,
+        messages: List[Dict[str, Any]],
+        user: Optional[str] = None,
+        explicit_session_id: Optional[str] = None
+    ) -> str:
+        """
+        Derives an immutable conversation identifier:
+        1. Explicit session ID passed in payload/header.
+        2. Standard OpenAI `user` parameter.
+        3. Fingerprint of the root user message (remains constant across turns).
+        """
+        if explicit_session_id:
+            return f"custom_{explicit_session_id.strip()}"
+        if user and str(user).strip() not in ("", "none", "null"):
+            return f"user_{str(user).strip()}"
+
+        # Fingerprint from the first user prompt in the messages array
+        first_user_content = ""
+        for m in messages:
+            if m.get("role") == "user":
+                c = m.get("content", "")
+                if isinstance(c, str) and c.strip():
+                    first_user_content = c.strip()
+                    break
+
+        if first_user_content:
+            h = hashlib.sha256(first_user_content.encode("utf-8")).hexdigest()[:16]
+            return f"conv_{h}"
+
+        return f"conv_anon_{int(time.time())}"
+
+    def acquire(
+        self,
+        conv_id: str,
+        create_fn: Callable[[], str],
+        delete_fn: Callable[[str], bool],
+        force_new: bool = False
+    ) -> Tuple[str, Optional[int]]:
+        """
+        Retrieves an active session for the conversation or initializes one.
+        Evicts and deletes the oldest LRU session on upstream if pool is full.
+        """
+        now = time.time()
+
+        # If forced new or already exists
+        if not force_new and conv_id in self.pool:
+            entry = self.pool[conv_id]
+            entry.last_active = now
+            entry.turn_count += 1
+            self.save()
+            return entry.session_id, entry.parent_message_id
+
+        # If pool is at capacity, evict least recently used (LRU)
+        if len(self.pool) >= self.max_size:
+            lru_key = min(self.pool.keys(), key=lambda k: self.pool[k].last_active)
+            old_entry = self.pool.pop(lru_key)
+            print(f"[SessionPool] Pool full ({len(self.pool)+1}/{self.max_size}). Evicting LRU {lru_key} ({old_entry.session_id})")
+            try:
+                delete_fn(old_entry.session_id)
+            except Exception as e:
+                print(f"[SessionPool] Upstream delete error for {old_entry.session_id}: {e}")
+
+        # Create fresh upstream session
+        new_sid = create_fn()
+        self.pool[conv_id] = SessionEntry(
+            session_id=new_sid,
+            conv_id=conv_id,
+            parent_message_id=None,
+            created_at=now,
+            last_active=now,
+            turn_count=1
+        )
         self.save()
+        return new_sid, None
 
-    def update_parent(self, new_parent_id: Optional[int]):
-        if new_parent_id is not None:
-            self.parent_message_id = new_parent_id
+    def update_parent(self, conv_id: str, new_parent_id: Optional[int]):
+        if conv_id in self.pool and new_parent_id is not None:
+            self.pool[conv_id].parent_message_id = new_parent_id
+            self.pool[conv_id].last_active = time.time()
             self.save()
 
-session_manager = SessionManager()
+    def reset_conv(self, conv_id: str, delete_fn: Callable[[str], bool]):
+        if conv_id in self.pool:
+            old = self.pool.pop(conv_id)
+            self.save()
+            try:
+                delete_fn(old.session_id)
+            except:
+                pass
+
+
+smart_pool = SmartSessionPool()

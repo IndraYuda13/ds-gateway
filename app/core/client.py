@@ -12,7 +12,7 @@ from app.config import (
     CLIENT_BUNDLE_ID
 )
 from app.core.pow import PoWSolver
-from app.core.session import session_manager
+from app.core.session import smart_pool
 
 class DeepSeekUpstreamClient:
     def __init__(self, token: str):
@@ -69,9 +69,13 @@ class DeepSeekUpstreamClient:
             data=json.dumps({"chat_session_id": session_id}).encode("utf-8"),
             headers=self._headers()
         )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return data.get("code") == 0
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                return data.get("code") == 0
+        except Exception as e:
+            print(f"[UpstreamClient] Failed to delete session {session_id}: {e}")
+            return False
 
     def create_pow_challenge(self, target_path: str = "/api/v0/chat/completion") -> Dict[str, Any]:
         body = json.dumps({"target_path": target_path}).encode("utf-8")
@@ -87,8 +91,7 @@ class DeepSeekUpstreamClient:
     def stream_completion(
         self,
         prompt: str,
-        session_id: Optional[str] = None,
-        parent_message_id: Optional[int] = None,
+        conv_id: str,
         thinking_enabled: bool = False,
         search_enabled: bool = False,
         force_new_session: bool = False
@@ -96,16 +99,13 @@ class DeepSeekUpstreamClient:
         """
         Yields (fragment_type, token_str, session_id, response_message_id)
         """
-        # Resolve session
-        if session_id:
-            active_sid = session_id
-            active_parent = parent_message_id
-        else:
-            if force_new_session or not session_manager.session_id:
-                new_sid = self.create_session()
-                session_manager.reset(new_sid)
-            active_sid = session_manager.session_id
-            active_parent = session_manager.parent_message_id
+        # Acquire session from SmartSessionPool
+        active_sid, active_parent = smart_pool.acquire(
+            conv_id=conv_id,
+            create_fn=self.create_session,
+            delete_fn=self.delete_session,
+            force_new=force_new_session
+        )
 
         # Solve anti-bot PoW + get leim token
         leim_val = self.get_hif_leim()
@@ -142,8 +142,7 @@ class DeepSeekUpstreamClient:
                 print(f"[UpstreamClient] Session {active_sid} error HTTP {e.code}. Auto-healing with new session...")
                 yield from self.stream_completion(
                     prompt=prompt,
-                    session_id=None,
-                    parent_message_id=None,
+                    conv_id=conv_id,
                     thinking_enabled=thinking_enabled,
                     search_enabled=search_enabled,
                     force_new_session=True
@@ -196,6 +195,6 @@ class DeepSeekUpstreamClient:
                 if tok is not None:
                     yield current_type, tok, active_sid, latest_resp_id
 
-        # Update parent ID in local session manager if using the active session
-        if not session_id and latest_resp_id:
-            session_manager.update_parent(latest_resp_id)
+        # Update parent ID in SmartSessionPool for this conversation
+        if latest_resp_id:
+            smart_pool.update_parent(conv_id, latest_resp_id)

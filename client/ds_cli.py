@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-DeepSeek Terminal Client & Python SDK
+DeepSeek Terminal Client & Python SDK (Smart Session Pool Edition)
 Connects to DeepSeek Web API Proxy via Cloudflare Tunnel or local host.
 Zero external dependencies (Python Standard Library only).
 """
@@ -11,7 +11,7 @@ import json
 import urllib.request
 import urllib.error
 import argparse
-from typing import Generator, Dict, Any, Tuple, Optional
+from typing import Generator, Dict, Any, Tuple, Optional, List
 
 DEFAULT_API_URL = os.getenv("DEEPSEEK_API_BASE", "https://deepseek.indrayuda.my.id")
 
@@ -38,7 +38,7 @@ class DeepSeekCLIClient:
     def _headers(self) -> Dict[str, str]:
         return {
             "Content-Type": "application/json",
-            "User-Agent": "DeepSeekClient/1.1",
+            "User-Agent": "DeepSeekClient/1.2",
             "Authorization": f"Bearer {self.api_key}"
         }
 
@@ -50,13 +50,12 @@ class DeepSeekCLIClient:
         except Exception as e:
             return {"error": str(e), "status": "offline"}
 
-    def new_session(self) -> Optional[str]:
+    def new_session(self, conv_id: Optional[str] = None) -> Optional[str]:
         try:
-            req = urllib.request.Request(
-                f"{self.base_url}/chat/new",
-                data=b"{}",
-                headers=self._headers()
-            )
+            url = f"{self.base_url}/chat/new"
+            if conv_id:
+                url += f"?conv_id={conv_id}"
+            req = urllib.request.Request(url, data=b"{}", headers=self._headers())
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 return data.get("session_id")
@@ -66,19 +65,25 @@ class DeepSeekCLIClient:
 
     def stream_chat(
         self,
-        prompt: str,
-        model: str = "deepseek-chat",
+        messages: List[Dict[str, str]],
+        model: str = "ds-chat",
         thinking: Optional[bool] = None,
         search: bool = False,
-        new_session: bool = False
+        new_session: bool = False,
+        session_id: Optional[str] = None,
+        user: Optional[str] = None
     ) -> Generator[Tuple[Dict[str, Any], Optional[str]], None, None]:
         payload = {
             "model": model,
-            "messages": [{"role": "user", "content": prompt}],
+            "messages": messages,
             "stream": True,
             "search": search,
             "new_session": new_session
         }
+        if session_id:
+            payload["session_id"] = session_id
+        if user:
+            payload["user"] = user
         if thinking is not None:
             payload["thinking"] = thinking
 
@@ -108,12 +113,13 @@ class DeepSeekCLIClient:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="DeepSeek Web API Terminal Client (Persistent Session)")
+    parser = argparse.ArgumentParser(description="DeepSeek Web API Terminal Client (Smart Session Pool)")
     parser.add_argument("prompt", nargs="?", help="Direct prompt. If omitted, opens interactive REPL mode.")
     parser.add_argument("--api-url", default=DEFAULT_API_URL, help=f"API Base URL (default: {DEFAULT_API_URL})")
     parser.add_argument("--no-think", action="store_true", help="Disable DeepSeek-R1 reasoning (Instant mode)")
     parser.add_argument("--search", action="store_true", help="Enable live web search")
     parser.add_argument("--new", action="store_true", help="Force create a new conversation thread on DeepSeek")
+    parser.add_argument("--user", default=None, help="Explicit conversation/user ID for session isolation")
     args = parser.parse_args()
 
     client = DeepSeekCLIClient(api_url=args.api_url)
@@ -127,11 +133,12 @@ def main():
             print(color("Prompt cannot be empty.", RED))
             sys.exit(1)
 
-        model = "deepseek-chat" if args.no_think else "deepseek-reasoner"
+        model = "ds-chat" if args.no_think else "ds-reasoner"
         in_think = False
 
         try:
-            for delta, _ in client.stream_chat(prompt, model=model, search=args.search, new_session=args.new):
+            msgs = [{"role": "user", "content": prompt}]
+            for delta, _ in client.stream_chat(msgs, model=model, search=args.search, new_session=args.new, user=args.user):
                 if "reasoning_content" in delta:
                     if not in_think:
                         sys.stderr.write(color("\n--- [Thinking / R1 Reasoning] ---\n", YELLOW))
@@ -154,21 +161,22 @@ def main():
     health = client.check_health()
     is_online = health.get("status") == "online"
     status_str = color("Online ✓", GREEN) if is_online else color(f"Warning ({health.get('error', 'offline')})", RED)
-    active_sess = health.get("active_session", {}).get("id", "auto")
     user_name = health.get("account", {}).get("name", "User")
+    active_pool_count = health.get("pool", {}).get("active_conversations_count", 0)
 
     print(color("=" * 64, CYAN))
-    print(color("       DeepSeek Terminal Client (Persistent Thread)       ", BOLD + CYAN))
+    print(color("       DeepSeek Terminal Client (Smart Session Pool)       ", BOLD + CYAN))
     print(color("=" * 64, CYAN))
     print(f"  {color('API Endpoint  :', BOLD)} {client.base_url}")
     print(f"  {color('Status        :', BOLD)} {status_str} ({user_name})")
-    print(f"  {color('Active Thread :', BOLD)} {active_sess[:14]}...")
+    print(f"  {color('Active Pool   :', BOLD)} {active_pool_count} active conversation slots")
     print(f"  {color('Commands      :', BOLD)} /think [on|off], /search [on|off], /new, /exit")
     print(color("-" * 64, CYAN))
 
     thinking_on = not args.no_think
     search_on = args.search
     force_next_new = args.new
+    history: List[Dict[str, str]] = []
 
     while True:
         try:
@@ -182,12 +190,9 @@ def main():
                 print(color("Sampai jumpa bre! 👋", CYAN))
                 break
             elif prompt.lower() in ('/new', '/clear', '/reset'):
-                new_sid = client.new_session()
-                if new_sid:
-                    print(color(f"[✓] New chat thread initialized on DeepSeek: {new_sid[:14]}...", GREEN))
-                else:
-                    force_next_new = True
-                    print(color("[✓] Thread will reset on next prompt.", GREEN))
+                history.clear()
+                force_next_new = True
+                print(color("[✓] Fresh conversation thread initialized (history cleared).", GREEN))
                 continue
             elif prompt.lower() == '/think on':
                 thinking_on = True
@@ -209,15 +214,25 @@ def main():
                 print("Commands:")
                 print("  /think on|off  : Toggle DeepSeek-R1 reasoning")
                 print("  /search on|off : Toggle web search integration")
-                print("  /new           : Create a fresh thread on DeepSeek")
+                print("  /new           : Start a fresh chat thread")
                 print("  /exit          : Exit client")
                 continue
 
-            model = "deepseek-reasoner" if thinking_on else "deepseek-chat"
+            model = "ds-reasoner" if thinking_on else "ds-chat"
             in_think = False
             first_resp = True
+            ans_buf = []
 
-            for delta, _ in client.stream_chat(prompt, model=model, search=search_on, new_session=force_next_new):
+            # Append current turn to client history
+            history.append({"role": "user", "content": prompt})
+
+            for delta, sid in client.stream_chat(
+                messages=history,
+                model=model,
+                search=search_on,
+                new_session=force_next_new,
+                user=args.user
+            ):
                 force_next_new = False
                 if "reasoning_content" in delta:
                     if not in_think:
@@ -233,9 +248,13 @@ def main():
                         sys.stdout.write(f"\n{color('🤖 DeepSeek:', GREEN + BOLD)}\n")
                         first_resp = False
                     tok = delta["content"]
+                    ans_buf.append(tok)
                     sys.stdout.write(tok)
                     sys.stdout.flush()
             sys.stdout.write("\n")
+
+            # Save assistant reply to client history for multi-turn continuity
+            history.append({"role": "assistant", "content": "".join(ans_buf)})
 
         except KeyboardInterrupt:
             print(color("\n[!] Type /exit to quit.", YELLOW))

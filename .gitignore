@@ -10,8 +10,7 @@ venv/
 ENV/
 
 # Data / Session State
-data/session_state.json
-data/*.tmp
+data/
 *.log
 
 # IDE

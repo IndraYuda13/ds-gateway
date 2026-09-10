@@ -13,6 +13,7 @@ class ChatCompletionRequest(BaseModel):
     search: Optional[bool] = False
     session_id: Optional[str] = None
     new_session: Optional[bool] = False
+    user: Optional[str] = None
     temperature: Optional[float] = 1.0
     max_tokens: Optional[int] = None
 
@@ -22,6 +23,8 @@ class SimpleChatRequest(BaseModel):
     search: Optional[bool] = False
     stream: Optional[bool] = False
     new_session: Optional[bool] = False
+    user: Optional[str] = None
+    session_id: Optional[str] = None
 
 class ChatMessage(BaseModel):
     role: str
