@@ -1,0 +1,48 @@
+from typing import List, Optional, Dict, Any
+from pydantic import BaseModel, Field
+
+class MessageItem(BaseModel):
+    role: str
+    content: str
+
+class ChatCompletionRequest(BaseModel):
+    model: Optional[str] = "deepseek-chat"
+    messages: List[MessageItem]
+    stream: Optional[bool] = False
+    thinking: Optional[bool] = None
+    search: Optional[bool] = False
+    session_id: Optional[str] = None
+    new_session: Optional[bool] = False
+    temperature: Optional[float] = 1.0
+    max_tokens: Optional[int] = None
+
+class SimpleChatRequest(BaseModel):
+    prompt: str
+    thinking: Optional[bool] = False
+    search: Optional[bool] = False
+    stream: Optional[bool] = False
+    new_session: Optional[bool] = False
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+    reasoning_content: Optional[str] = None
+
+class ChoiceItem(BaseModel):
+    index: int = 0
+    message: ChatMessage
+    finish_reason: str = "stop"
+
+class UsageInfo(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
+
+class ChatCompletionResponse(BaseModel):
+    id: str
+    object: str = "chat.completion"
+    created: int
+    model: str
+    session_id: Optional[str] = None
+    choices: List[ChoiceItem]
+    usage: UsageInfo

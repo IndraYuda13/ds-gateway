@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  deepseek-api:
+    build: .
+    container_name: deepseek-web-api
+    restart: unless-stopped
+    ports:
+      - "8550:8550"
+    environment:
+      - DEEPSEEK_TOKEN=${DEEPSEEK_TOKEN:-qosOTpuhzASFMfNcNw1rTJhJXaV6CK9icR3C94feTk1ZY7IPBpFI/Ogk9pOp69ek}
+      - PORT=8550
+      - HOST=0.0.0.0
+      - PROXY_API_KEY=${PROXY_API_KEY:-}
+      - DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data

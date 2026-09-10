@@ -1,0 +1,20 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Environments
+.env
+.venv/
+venv/
+ENV/
+
+# Data / Session State
+data/session_state.json
+data/*.tmp
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
