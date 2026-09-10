@@ -3,9 +3,9 @@ requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "deepseek-web-api"
+name = "ds-gateway"
 version = "1.1.0"
-description = "High-performance OpenAI-compatible API proxy for DeepSeek Web with WASM PoW bypass and session persistence."
+description = "Lightweight OpenAI-compatible conversational gateway and CLI interface with session persistence."
 authors = [{ name = "Indra Yuda", email = "indrayuda13@gmail.com" }]
 license = { text = "MIT" }
 readme = "README.md"
@@ -17,5 +17,5 @@ dependencies = [
 ]
 
 [project.scripts]
-deepseek-server = "app.main:app"
-deepseek-cli = "client.deepseek_cli:main"
+ds-server = "app.main:app"
+ds-cli = "client.ds_cli:main"

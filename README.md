@@ -1,175 +1,175 @@
-# 🚀 DeepSeek Web API Proxy & CLI
+# ⚡ ds-gateway
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109%2B-009688.svg?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Docker](https://img.shields.io/badge/Docker-Enabled-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?logo=docker&logoColor=white)](https://www.docker.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![OpenAI Compatible](https://img.shields.io/badge/API-OpenAI%20Compatible-412991.svg?logo=openai&logoColor=white)](https://platform.openai.com/docs/api-reference)
 
-Proxy API berkinerja tinggi yang mem-bypass proteksi bot **chat.deepseek.com** dan mengubah akun web gratisan DeepSeek menjadi **API standar OpenAI-Compatible** (`/v1/chat/completions`). 
+High-performance, lightweight OpenAI-compatible reverse gateway and terminal client for upstream DS conversational endpoints. 
 
-Dilengkapi dengan **WebAssembly PoW Solver** super cepat (~50–100ms), **Persistent Session State** (mencegah spam ratusan sesi chat di akun DeepSeek), serta dukungan **Real-Time Streaming** untuk token penalaran (*DeepSeek-R1 Thinking*) dan jawaban (*V3 Instant*).
-
----
-
-## ✨ Fitur Unggulan
-
-- ⚡ **Sub-100ms Anti-Bot Bypass**: Menyelesaikan challenge proof-of-work (`DeepSeekHashV1`) menggunakan modul WebAssembly native via Node.js bridge (dengan fallback murni Pure Python Keccak-256 tanpa dependensi luar).
-- 🧠 **Dukungan Penuh DeepSeek-R1 & V3**:
-  - `deepseek-chat` (Mode Instant respons cepat)
-  - `deepseek-reasoner` (Mode Deep Thinking / Chain-of-Thought)
-- 🔒 **Persistent Session Sticky Tracker**:
-  - Semua percakapan otomatis diikat ke dalam **satu sesi thread yang sama** secara berkelanjutan (multi-turn memory).
-  - **Zero Session Spam**: Tidak membuat puluhan chat baru di sidebar web DeepSeek kecuali dipicu secara eksplisit (`/new` atau `new_session=True`).
-  - Auto-healing: Jika sesi di web terhapus/kadaluarsa, proxy otomatis membuat sesi pengganti tanpa memutus request.
-- 🔌 **Drop-in Replacement OpenAI SDK**: Kompatibel 100% dengan library resmi `openai-python`, `openai-node`, LangChain, LibreChat, LobeChat, NextChat, maupun OpenWebUI.
-- 🌐 **Cloudflare Tunnel Ready**: Siap diexpose ke domain publik via Cloudflare Tunnel tanpa perlu IP publik statis atau port forwarding.
-- 💻 **Standalone Zero-Dependency CLI**: Disertai client terminal interaktif bertenaga Python Standard Library murni.
+Engineered with a sub-100ms WebAssembly challenge solver, persistent session state orchestration (preventing session spamming on upstream accounts), and full streaming support for both fast responses and deep reasoning tokens.
 
 ---
 
-## 🏛️ Arsitektur Sistem
+## 🌟 Highlights
+
+- ⚡ **High-Speed Challenge Resolution**: Resolves cryptographic anti-bot proof-of-work (`DeepSeekHashV1`) in ~50–100ms using native WebAssembly via Node.js, with an autonomous pure Python Keccak-256 fallback when Node is unavailable.
+- 🔒 **Sticky Session Orchestrator**:
+  - Automatically binds consecutive requests to a **single persistent conversation thread**.
+  - **Zero Workspace Clutter**: Eliminates the issue of creating dozens of orphaned chat sessions on the upstream web account.
+  - Auto-healing resilience: Transparently initializes a replacement thread if the active remote session is archived or deleted.
+- 🧠 **Dual Engine Support**:
+  - `ds-chat` / `deepseek-chat` (Fast instant inference)
+  - `ds-reasoner` / `deepseek-reasoner` (Chain-of-thought deep reasoning stream)
+- 🔌 **Drop-in OpenAI Compatibility**: Works out of the box with official OpenAI SDKs (`openai-python`, `openai-node`), LangChain, LobeChat, LibreChat, NextChat, and OpenWebUI.
+- 💻 **Zero-Dependency CLI**: Includes a self-contained interactive terminal client powered entirely by the Python Standard Library.
+- 🐳 **Production Packaging**: Pre-configured Docker, Docker Compose, and Systemd deployment templates.
+
+---
+
+## 📐 Architecture
 
 ```
-[ Client / App / CLI ] 
-        │  (HTTP / OpenAI format)
-        ▼
-[ Cloudflare Tunnel / Reverse Proxy ]
-        │  (https://deepseek.indrayuda.my.id)
-        ▼
-[ FastAPI Proxy Server (:8550) ]
-        │
-        ├── Session State Manager (session_state.json)
-        ├── Dynamic Anti-Bot Solver (solver.js + sha3_wasm_bg.wasm)
-        └── Token Poller (x-hif-leim query)
-        │
-        ▼  (HTTP/2 SSE Stream)
-[ chat.deepseek.com Upstream ]
+[ Client Applications / SDK / CLI ]
+                │
+                ▼  (Standard OpenAI Format)
+    [ Reverse Proxy / CF Tunnel ]
+                │
+                ▼  (Port :8550)
+      [ DS-Gateway Server ]
+                │
+                ├── Session State Store (data/session_state.json)
+                ├── WASM Challenge Solver (solver.js + sha3_wasm_bg.wasm)
+                └── Upstream Temporal Handshake Poller
+                │
+                ▼  (HTTP/2 Server-Sent Events)
+       [ Upstream Endpoint ]
 ```
 
 ---
 
 ## 🚀 Quickstart
 
-### 1. Cara Termudah: Gunakan Python CLI Langsung
-Jika server proxy sudah online di server/tunnel, kamu cukup menjalankan script client standalone (tanpa install library apa pun):
+### 1. Terminal Client (Zero External Dependencies)
+Connect directly to an active gateway instance:
 
 ```bash
-# Clone repo
-git clone https://github.com/IndraYuda13/deepseek-web-api.git
-cd deepseek-web-api
+# Clone the repository
+git clone https://github.com/IndraYuda13/ds-gateway.git
+cd ds-gateway
 
-# Masuk ke Terminal Chat Interaktif
+# Launch interactive terminal REPL
 python3 run_cli.py
 
-# Atau kirim 1 pertanyaan langsung (Single-shot)
-python3 run_cli.py --no-think "Jelaskan apa itu Docker dalam 2 kalimat."
+# Or execute a single prompt directly
+python3 run_cli.py --no-think "Explain event-driven architecture in two sentences."
 ```
 
 ---
 
-### 2. Self-Hosting: Menjalankan Server Lokal / VPS
+### 2. Self-Hosting (Local Machine or VPS)
 
-#### Prasyarat
+#### Prerequisites
 - Python 3.10+
-- Node.js (direkomendasikan untuk WASM PoW ~100ms)
+- Node.js (recommended for ~50ms WASM challenge execution)
 
-#### Langkah Instalasi
+#### Installation
 ```bash
 # 1. Clone repository
-git clone https://github.com/IndraYuda13/deepseek-web-api.git
-cd deepseek-web-api
+git clone https://github.com/IndraYuda13/ds-gateway.git
+cd ds-gateway
 
-# 2. Buat virtual environment & install dependensi
+# 2. Set up virtual environment
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 
-# 3. Konfigurasi Token DeepSeek (.env)
+# 3. Configure credentials
 cp .env.example .env
-# Edit .env dan masukkan DEEPSEEK_TOKEN akunmu (lihat panduan ambil token di bawah)
+# Open .env and set your DS_TOKEN (see Token Extraction below)
 
-# 4. Jalankan Server
+# 4. Start the gateway server
 python3 main.py
 ```
-Server akan berjalan di `http://0.0.0.0:8550`.
+The gateway will be operational on `http://0.0.0.0:8550`.
 
 ---
 
-### 3. Menjalankan via Docker & Docker Compose
+### 3. Docker Deployment
 
 ```bash
-# Build dan jalankan container di background
+# Build and run container in detached mode
 docker compose up -d --build
 
-# Cek status log
+# View runtime logs
 docker compose logs -f
 ```
 
 ---
 
-### 4. Menjalankan sebagai Daemon 24/7 (Systemd)
+### 4. Production Systemd Service
 
-Salin file service yang disediakan:
+Deploy as a background daemon managed by systemd:
+
 ```bash
-sudo cp systemd/deepseek-api.service /etc/systemd/system/
+sudo cp systemd/deepseek-api.service /etc/systemd/system/ds-gateway.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now deepseek-api
+sudo systemctl enable --now ds-gateway
 
-# Cek status
-sudo systemctl status deepseek-api
+# Check service health
+sudo systemctl status ds-gateway
 ```
 
 ---
 
-## 🔑 Cara Mengambil Token DeepSeek
+## 🔑 Upstream Token Acquisition
 
-1. Buka browser dan login ke **[chat.deepseek.com](https://chat.deepseek.com)**.
-2. Buka Developer Tools (`F12` atau `Ctrl + Shift + I`) ➔ Masuk ke tab **Network**.
-3. Kirim sembarang pesan di chat.
-4. Cari request bernama `completion` atau `users/current`.
-5. Di bagian **Request Headers**, salin isi header `authorization`:
-   ```
+1. Navigate to the upstream chat portal in your desktop browser.
+2. Open Developer Tools (`F12` or `Ctrl + Shift + I`) and switch to the **Network** tab.
+3. Send any prompt in the chat.
+4. Locate the network request named `completion` or `users/current`.
+5. Under **Request Headers**, copy the value of the `authorization` header:
+   ```text
    Bearer qosOTpuhzASFMfNcNw...69ek
    ```
-6. Masukkan token tersebut ke file `.env` pada variabel `DEEPSEEK_TOKEN`.
+6. Paste the token into your `.env` file under `DS_TOKEN`.
 
 ---
 
-## 📡 Dokumentasi Endpoint API
+## 📡 API Reference
 
-### 1. Health & Status Check
+### Health & Runtime State
 ```bash
-curl -s https://deepseek.indrayuda.my.id/health
+curl -s http://localhost:8550/health
 ```
+
 **Response:**
 ```json
 {
   "status": "online",
-  "service": "DeepSeek Web API Proxy",
+  "service": "ds-gateway",
   "version": "1.1.0",
-  "models": ["deepseek-chat", "deepseek-reasoner"],
+  "models": ["ds-chat", "ds-reasoner"],
   "active_session": {
     "id": "85ac9330-ba67-4d71-923e-3aad6b2f6e45",
     "parent_message_id": 4
-  },
-  "account": {
-    "name": "Indra yuda adi saputra",
-    "email": "lvt*****re@gmail.com"
   }
 }
 ```
 
-### 2. OpenAI Chat Completions (`/v1/chat/completions`)
-Mendukung format standar OpenAI baik streaming (SSE) maupun non-streaming:
+---
 
+### OpenAI Chat Completions (`/v1/chat/completions`)
+
+#### Standard Request (Non-Streaming)
 ```bash
-curl -s -X POST https://deepseek.indrayuda.my.id/v1/chat/completions \
+curl -s -X POST http://localhost:8550/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-reasoner",
+    "model": "ds-reasoner",
     "messages": [
-      {"role": "user", "content": "Berapa hasil 17 * 23?"}
+      {"role": "user", "content": "What is 17 * 23? Return answer only."}
     ]
   }'
 ```
@@ -180,14 +180,14 @@ curl -s -X POST https://deepseek.indrayuda.my.id/v1/chat/completions \
   "id": "chatcmpl-9d81d6e4dac3",
   "object": "chat.completion",
   "created": 1789031609,
-  "model": "deepseek-reasoner",
+  "model": "ds-reasoner",
   "choices": [
     {
       "index": 0,
       "message": {
         "role": "assistant",
         "content": "391",
-        "reasoning_content": "User asks 17 * 23. 17 * 20 = 340, 17 * 3 = 51. 340 + 51 = 391."
+        "reasoning_content": "Compute 17 * 23: 17 * 20 = 340, 17 * 3 = 51. Sum is 391."
       },
       "finish_reason": "stop"
     }
@@ -200,60 +200,60 @@ curl -s -X POST https://deepseek.indrayuda.my.id/v1/chat/completions \
 }
 ```
 
-### 3. Reset / Buat Sesi Baru (`/chat/new`)
-Secara default, proxy akan **tetap melanjutkan obrolan di sesi yang sama**. Jika kamu ingin membuka topik/sesi baru di web DeepSeek:
+---
+
+### Resetting Conversation Thread (`/chat/new`)
+By default, the gateway maintains thread continuity across all incoming calls. To explicitly initialize a brand-new conversation thread:
 
 ```bash
-curl -s -X POST https://deepseek.indrayuda.my.id/chat/new
+curl -s -X POST http://localhost:8550/chat/new
 ```
-Atau tambahkan header `"X-New-Session: true"` / payload `"new_session": true` pada request completion berikutnya.
+Alternatively, include the header `X-New-Session: true` or pass `"new_session": true` in the JSON completion payload.
 
 ---
 
-## 💻 Contoh Integrasi Code
+## 💻 SDK Integration Examples
 
-### Python (OpenAI SDK Resmi)
+### Python (Official `openai` Library)
 ```python
 from openai import OpenAI
 
 client = OpenAI(
-    base_url="https://deepseek.indrayuda.my.id/v1",
-    api_key="lemon"  # Isi sembarang string
+    base_url="http://localhost:8550/v1",
+    api_key="none"  # Any non-empty string
 )
 
-# DeepSeek-R1 (Deep Reasoning)
-response = client.chat.completions.create(
-    model="deepseek-reasoner",
-    messages=[
-        {"role": "user", "content": "Rancang arsitektur microservices untuk e-commerce!"}
-    ],
+# Deep reasoning model with streaming
+stream = client.chat.completions.create(
+    model="ds-reasoner",
+    messages=[{"role": "user", "content": "Design a distributed rate-limiter architecture."}],
     stream=True
 )
 
-for chunk in response:
-    # Token reasoning/thinking
-    if hasattr(chunk.choices[0].delta, 'reasoning_content') and chunk.choices[0].delta.reasoning_content:
+for chunk in stream:
+    # Reasoning / thinking delta
+    if hasattr(chunk.choices[0].delta, "reasoning_content") and chunk.choices[0].delta.reasoning_content:
         print(chunk.choices[0].delta.reasoning_content, end="", flush=True)
-    # Token jawaban final
+    # Output response delta
     if chunk.choices[0].delta.content:
         print(chunk.choices[0].delta.content, end="", flush=True)
 print()
 ```
 
-### Node.js (OpenAI SDK)
+### Node.js (Official `openai` Library)
 ```javascript
 import OpenAI from "openai";
 
-const openai = new OpenAI({
-  baseURL: "https://deepseek.indrayuda.my.id/v1",
-  apiKey: "lemon"
+const client = new OpenAI({
+  baseURL: "http://localhost:8550/v1",
+  apiKey: "none"
 });
 
 async function main() {
-  const stream = await openai.chat.completions.create({
-    model: "deepseek-chat",
-    messages: [{ role: "user", content: "Halo dari Node.js!" }],
-    stream: true,
+  const stream = await client.chat.completions.create({
+    model: "ds-chat",
+    messages: [{ role: "user", content: "Summarize CAP theorem in 3 bullet points." }],
+    stream: true
   });
 
   for await (const chunk of stream) {
@@ -267,29 +267,29 @@ main();
 
 ---
 
-## ⚙️ Variabel Lingkungan (`.env`)
+## ⚙️ Environment Variables
 
-| Variabel | Deskripsi | Default |
+| Variable | Description | Default |
 | :--- | :--- | :--- |
-| `DEEPSEEK_TOKEN` | Bearer token dari akun web chat.deepseek.com | *(Wajib diisi)* |
-| `HOST` | Bind host listener | `0.0.0.0` |
-| `PORT` | Bind port listener | `8550` |
-| `PROXY_API_KEY` | *(Opsional)* Password API untuk membatasi akses publik | `""` (Terbuka) |
-| `DATA_DIR` | Folder tempat menyimpan state sesi aktif (`session_state.json`) | `./data` |
+| `DS_TOKEN` | Bearer authorization token from upstream web account | *(Required)* |
+| `HOST` | Gateway listener host | `0.0.0.0` |
+| `PORT` | Gateway listener port | `8550` |
+| `PROXY_API_KEY` | *(Optional)* Access key for authenticating incoming API requests | `""` (Open) |
+| `DATA_DIR` | Directory for persistent thread state storage | `./data` |
 
 ---
 
-## 🛡️ Reverse-Engineering Notes: Anti-Bot & PoW Challenge
+## 🛡️ Protocol Mechanics: Proof-of-Work Challenge
 
-DeepSeek Web menggunakan proteksi multi-lapis:
-1. **Dynamic Challenge Verification (`x-hif-leim`)**: Token handshake temporal dari endpoint `https://hif-leim.deepseek.com/query` dengan TTL 600 detik.
-2. **Proof-of-Work Challenge (`DeepSeekHashV1`)**:
-   - Server memberikan difficulty ~144,000 dengan payload `challenge`, `salt`, `signature`, dan `expire_at`.
-   - Formula: Cari integer `nonce` sehingga `DeepSeekHashV1(salt + "_" + expire_at + "_" + nonce) == challenge`.
-   - Algoritma hashing adalah varian Keccak-256 (SHA3) dengan modifikasi word endian swap pada memory sponge. Modul WASM bawaan diekstraksi langsung dari bundle web DeepSeek untuk performa native maksimal.
+The upstream service protects sensitive completion routes with a proof-of-work challenge:
+- Challenge parameters: `algorithm` (`DeepSeekHashV1`), `challenge` (hex), `salt`, `difficulty` (~144,000), and `expire_at`.
+- Solving condition: Identify integer `nonce` satisfying:
+  $$\text{DeepSeekHashV1}(\text{salt} + \text{"\_"} + \text{expire\_at} + \text{"\_"} + \text{nonce}) = \text{challenge}$$
+- `DeepSeekHashV1` operates on a customized 64-bit Keccak-256 permutation with reversed 32-bit word ordering during absorb and squeeze phases.
+- The included WASM solver compiles directly into memory and executes via V8/Node.js, achieving sub-100ms nonce discovery.
 
 ---
 
-## 📄 Lisensi
+## 📄 License
 
-Didistribusikan di bawah Lisensi [MIT](LICENSE). Dibuat untuk tujuan edukasi, penelitian interoperabilitas protokol, dan otomatisasi produktivitas pribadi.
+This project is licensed under the [MIT License](LICENSE). Developed for protocol interoperability research, developer productivity, and local pipeline integration.

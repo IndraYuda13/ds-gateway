@@ -16,7 +16,7 @@ PORT = int(os.getenv("PORT", "8550"))
 DEBUG = os.getenv("DEBUG", "false").lower() in ("true", "1", "yes")
 
 # DeepSeek Upstream Configuration
-DEFAULT_TOKEN = os.getenv("DEEPSEEK_TOKEN", "qosOTpuhzASFMfNcNw1rTJhJXaV6CK9icR3C94feTk1ZY7IPBpFI/Ogk9pOp69ek")
+DEFAULT_TOKEN = os.getenv("DS_TOKEN", os.getenv("DEEPSEEK_TOKEN", "qosOTpuhzASFMfNcNw1rTJhJXaV6CK9icR3C94feTk1ZY7IPBpFI/Ogk9pOp69ek"))
 PROXY_API_KEY = os.getenv("PROXY_API_KEY", "")  # Optional API key for proxy access
 
 USER_AGENT = os.getenv(

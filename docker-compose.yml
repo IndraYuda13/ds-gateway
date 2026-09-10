@@ -1,14 +1,14 @@
 version: '3.8'
 
 services:
-  deepseek-api:
+  ds-gateway:
     build: .
-    container_name: deepseek-web-api
+    container_name: ds-gateway
     restart: unless-stopped
     ports:
       - "8550:8550"
     environment:
-      - DEEPSEEK_TOKEN=${DEEPSEEK_TOKEN:-qosOTpuhzASFMfNcNw1rTJhJXaV6CK9icR3C94feTk1ZY7IPBpFI/Ogk9pOp69ek}
+      - DS_TOKEN=${DS_TOKEN:-qosOTpuhzASFMfNcNw1rTJhJXaV6CK9icR3C94feTk1ZY7IPBpFI/Ogk9pOp69ek}
       - PORT=8550
       - HOST=0.0.0.0
       - PROXY_API_KEY=${PROXY_API_KEY:-}
