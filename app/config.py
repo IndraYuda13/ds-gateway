@@ -10,6 +10,24 @@ SESSION_FILE = DATA_DIR / "session_state.json"
 SOLVER_PATH = BASE_DIR / "app" / "solver.js"
 WASM_PATH = BASE_DIR / "app" / "sha3_wasm_bg.wasm"
 
+ENV_FILE = BASE_DIR / ".env"
+
+# Helper to load simple .env file if present
+if ENV_FILE.exists():
+    try:
+        with open(ENV_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                v = v.strip().strip("'\"")
+                if v and k not in os.environ:
+                    os.environ[k] = v
+    except Exception:
+        pass
+
 # Server Configuration
 HOST = os.getenv("HOST", "0.0.0.0")
 PORT = int(os.getenv("PORT", "8550"))
