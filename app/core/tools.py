@@ -7,6 +7,9 @@ textual formats:
 
   1. DSML (native preference): a wrapper of invoke/parameter lines whose
      tag names are built from the module constants below (BAR-based).
+     The model emits these bars INCONSISTENTLY (0-2 per side, mixed
+     within one block, ASCII pipes, and degraded/malformed closes on
+     long generations), so parsing is anchor-based and tolerant.
   2. JSON block fallback: a single JSON object with name/arguments keys.
 
 Both are parsed here into OpenAI-format structured tool_calls.
@@ -18,9 +21,8 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 BAR = "\uff5c"  # fullwidth vertical bar used by the DSML format
-# The model emits the bar characters inconsistently (1 or 2 per side, and
-# sometimes ASCII pipes), so every parser below accepts one-or-more bars.
-_BARS = "[" + BAR + "|]+"
+# bars OPTIONAL per side: emission varies from 0 (degraded) to 2
+_BARS_OPT = "[" + BAR + "|]*"
 
 TAG_CALLS_OPEN = "<" + BAR * 2 + "DSML" + BAR * 2 + " calls>"
 TAG_CALLS_CLOSE = "</" + BAR * 2 + "DSML" + BAR * 2 + " calls>"
@@ -29,20 +31,13 @@ TAG_INVOKE_CLOSE = "</" + BAR * 2 + "DSML" + BAR * 2 + " invoke>"
 TAG_PARAM_OPEN = "<" + BAR * 2 + "DSML" + BAR * 2 + " parameter "
 TAG_PARAM_CLOSE = "</" + BAR * 2 + "DSML" + BAR * 2 + " parameter>"
 
-DSML_INVOKE_RE = re.compile(
-    "<" + _BARS + r"\s*DSML\s*" + _BARS + r"\s+invoke\s+name=\"([^\"]+)\"[^>]*>(.*?)"
-    + "</" + _BARS + r"\s*DSML\s*" + _BARS + r"\s*invoke\s*>",
+# Any DSML-ish tag: tolerates missing '<', missing bars, malformed closes.
+# [^>\n]* keeps the match on one line so a missing '>' cannot swallow a value.
+_ANCHOR_RE = re.compile(
+    "</?" + _BARS_OPT + r"\s*DSML\s*" + _BARS_OPT + r"[^>\n]*>?",
     re.DOTALL,
 )
-DSML_PARAM_RE = re.compile(
-    "<" + _BARS + r"\s*DSML\s*" + _BARS + r"\s+parameter\s+name=\"([^\"]+)\"[^>]*>(.*?)"
-    + "</" + _BARS + r"\s*DSML\s*" + _BARS + r"\s*parameter\s*>",
-    re.DOTALL,
-)
-DSML_CALLS_RE = re.compile(
-    "<" + _BARS + r"\s*DSML\s*" + _BARS + r"\s+calls\s*>.*?</" + _BARS + r"\s*DSML\s*" + _BARS + r"\s*calls\s*>",
-    re.DOTALL,
-)
+_NAME_RE = re.compile(r'name\s*=\s*"([^"]*)"')
 
 J_OPEN = "<" + "tool_call" + ">"
 J_CLOSE = "</" + "tool_call" + ">"
@@ -122,20 +117,62 @@ def _coerce_value(raw: str) -> Any:
 
 
 def _parse_dsml(content: str) -> List[Dict[str, Any]]:
+    """Walk DSML anchors tolerantly.
+
+    Handles inconsistent bar counts (0-2 per side), ASCII pipes, mixed
+    forms inside one block, and degraded/malformed closing tags (missing
+    'parameter'/'invoke' words, missing '<'). A parameter value runs from
+    its opening anchor to the NEXT anchor of any kind.
+    """
+    anchors = list(_ANCHOR_RE.finditer(content))
+    if not anchors:
+        return []
+
     calls: List[Dict[str, Any]] = []
-    for m in DSML_INVOKE_RE.finditer(content):
-        name = m.group(1).strip()
-        if not name:
+    cur: Optional[Dict[str, Any]] = None
+    pname: Optional[str] = None
+    pstart: Optional[int] = None
+
+    def close_param(end: int) -> None:
+        nonlocal pname, pstart
+        if cur is not None and pname is not None and pstart is not None:
+            cur["_args"][pname] = _coerce_value(content[pstart:end])
+        pname = pstart = None
+
+    for m in anchors:
+        tag = m.group(0)
+        low = tag.lower()
+        nm = _NAME_RE.search(tag)
+        if nm and "invoke" in low:
+            close_param(m.start())
+            if cur is not None:
+                calls.append(cur)
+            cur = {
+                "id": "call_" + uuid.uuid4().hex[:24],
+                "type": "function",
+                "function": {"name": nm.group(1).strip(), "arguments": "{}"},
+                "_args": {},
+            }
+        elif nm and "parameter" in low:
+            close_param(m.start())
+            if cur is None:
+                continue
+            pname = nm.group(1).strip()
+            pstart = m.end()
+        else:
+            # wrapper open/close, mangled closes, anything else: boundary
+            close_param(m.start())
+    close_param(len(content))
+    if cur is not None:
+        calls.append(cur)
+
+    out: List[Dict[str, Any]] = []
+    for c in calls:
+        if not c["function"]["name"]:
             continue
-        args: Dict[str, Any] = {}
-        for pm in DSML_PARAM_RE.finditer(m.group(2)):
-            args[pm.group(1).strip()] = _coerce_value(pm.group(2))
-        calls.append({
-            "id": "call_" + uuid.uuid4().hex[:24],
-            "type": "function",
-            "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
-        })
-    return calls
+        c["function"]["arguments"] = json.dumps(c.pop("_args"), ensure_ascii=False)
+        out.append(c)
+    return out
 
 
 def _parse_json_blocks(content: str) -> List[Dict[str, Any]]:
@@ -174,8 +211,11 @@ def parse_tool_calls(content: str) -> Tuple[str, Optional[List[Dict[str, Any]]]]
     if not calls:
         return content, None
 
-    cleaned = DSML_CALLS_RE.sub("", content)
-    cleaned = DSML_INVOKE_RE.sub("", cleaned)  # stray invokes without wrapper
+    cleaned = content
+    anchors = list(_ANCHOR_RE.finditer(content))
+    if anchors and any("invoke" in a.group(0).lower() for a in anchors):
+        # drop the whole tool-block region (first anchor through last)
+        cleaned = content[:anchors[0].start()] + content[anchors[-1].end():]
     cleaned = JSON_BLOCK_RE.sub("", cleaned).strip()
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned, calls
