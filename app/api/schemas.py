@@ -1,5 +1,5 @@
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 class MessageItem(BaseModel):
     role: str
@@ -13,7 +13,8 @@ class ChatCompletionRequest(BaseModel):
     model: Optional[str] = "deepseek-chat"
     messages: List[MessageItem]
     stream: Optional[bool] = False
-    thinking: Optional[bool] = None
+    # bool, or Anthropic-style {"type": "enabled"/"disabled"} (coerced below)
+    thinking: Optional[Any] = None
     search: Optional[bool] = False
     session_id: Optional[str] = None
     new_session: Optional[bool] = False
@@ -24,6 +25,22 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: Optional[Any] = None
     parallel_tool_calls: Optional[bool] = None
     functions: Optional[List[Dict[str, Any]]] = None  # legacy function-calling format
+
+    @field_validator("thinking", mode="before")
+    @classmethod
+    def _coerce_thinking(cls, v):
+        """Normalize thinking to bool/None: accept bool, {"type": "enabled"},
+        {"type": "disabled", "budget_tokens": N}, or plain strings."""
+        if v is None or isinstance(v, bool):
+            return v
+        if isinstance(v, dict):
+            t = v.get("type")
+            if isinstance(t, str):
+                return t.strip().lower() in ("enabled", "on", "true", "yes", "1")
+            return bool(v)
+        if isinstance(v, str):
+            return v.strip().lower() in ("enabled", "on", "true", "yes", "1")
+        return bool(v)
 
 class SimpleChatRequest(BaseModel):
     prompt: str
