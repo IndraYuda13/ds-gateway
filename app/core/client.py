@@ -1,7 +1,8 @@
 import json
+import uuid
 import urllib.request
 import urllib.error
-from typing import Optional, Dict, Any, Generator, Tuple
+from typing import Optional, Dict, Any, Generator, Tuple, List
 
 from app.config import (
     DS_BASE_URL,
@@ -88,6 +89,40 @@ class DeepSeekUpstreamClient:
             data = json.loads(resp.read().decode("utf-8"))
             return data["data"]["biz_data"]["challenge"]
 
+    def upload_file(self, file_bytes: bytes, filename: str, content_type: str) -> str:
+        """Upload a file (image) to DeepSeek and return its file id."""
+        challenge = self.create_pow_challenge(target_path="/api/v0/file/upload_file")
+        b64_pow = PoWSolver.solve(challenge)
+
+        b = "----dsgw" + uuid.uuid4().hex[:16]
+        head = (
+            f"--{b}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            f"Content-Type: {content_type}\r\n\r\n"
+        ).encode("utf-8")
+        body = head + file_bytes + f"\r\n--{b}--\r\n".encode("utf-8")
+
+        headers = self._headers(json_content=False)
+        headers["x-ds-pow-response"] = b64_pow
+        headers["content-type"] = f"multipart/form-data; boundary={b}"
+
+        req = urllib.request.Request(
+            f"{DS_BASE_URL}/api/v0/file/upload_file",
+            data=body,
+            headers=headers,
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if data.get("code") != 0:
+            raise RuntimeError(f"upload failed: {data.get('msg')}")
+        biz = data["data"]["biz_data"]
+        if biz.get("biz_code") not in (0, None):
+            raise RuntimeError(f"upload biz error: {biz.get('biz_msg')}")
+        file_id = biz.get("id")
+        if not file_id:
+            raise RuntimeError("upload response missing file id")
+        return file_id
+
     def stream_completion(
         self,
         prompt: str,
@@ -95,7 +130,8 @@ class DeepSeekUpstreamClient:
         thinking_enabled: bool = False,
         search_enabled: bool = False,
         force_new_session: bool = False,
-        inject_prefix: str = ""
+        inject_prefix: str = "",
+        ref_file_ids: Optional[List[str]] = None
     ) -> Generator[Tuple[str, str, str, Optional[int]], None, None]:
         """
         Yields (fragment_type, token_str, session_id, response_message_id)
@@ -124,7 +160,7 @@ class DeepSeekUpstreamClient:
             "parent_message_id": active_parent,
             "model_type": "default",
             "prompt": prompt,
-            "ref_file_ids": [],
+            "ref_file_ids": list(ref_file_ids or []),
             "thinking_enabled": thinking_enabled,
             "search_enabled": search_enabled,
             "action": None,

@@ -14,6 +14,7 @@ from app.api.schemas import (
     SimpleChatRequest
 )
 from app.core.tools import build_tool_instructions, parse_tool_calls
+from app.core.vision import extract_images
 
 router = APIRouter()
 
@@ -34,6 +35,13 @@ def build_last_prompt(req: ChatCompletionRequest) -> str:
     last = req.messages[-1]
     role = (last.role or "user").lower()
     content = last.content or ""
+    if isinstance(content, list):
+        # vision-style content parts: keep the text parts for the prompt
+        texts = [
+            p.get("text", "") for p in content
+            if isinstance(p, dict) and p.get("type") == "text"
+        ]
+        content = "\n".join(t for t in texts if t).strip()
     if role == "tool":
         label = last.name or last.tool_call_id or "tool"
         return f"[Tool result for {label}]:\n{content}"
@@ -170,6 +178,17 @@ def sse_event_stream(req: ChatCompletionRequest, token: str, force_new: bool = F
     prompt = build_last_prompt(req)
     system_prefix = build_system_prefix(req)
 
+    # Vision: upload images from the last user message, get ref_file_ids
+    ref_file_ids = []
+    try:
+        images = extract_images(req.messages)
+        for img_bytes, filename, content_type in images:
+            fid = client.upload_file(img_bytes, filename, content_type)
+            ref_file_ids.append(fid)
+            print(f"[Vision] uploaded {filename} -> {fid}")
+    except Exception as e:
+        print(f"[Vision] image handling failed: {e}")
+
     # When tools are declared, buffer the stream so tool-call blocks can be
     # parsed and emitted as structured tool_calls deltas at the end.
     tools_mode = bool(req.tools or req.functions)
@@ -192,7 +211,8 @@ def sse_event_stream(req: ChatCompletionRequest, token: str, force_new: bool = F
         thinking_enabled=thinking_enabled,
         search_enabled=bool(req.search),
         force_new_session=force_new,
-        inject_prefix=system_prefix
+        inject_prefix=system_prefix,
+        ref_file_ids=ref_file_ids
     ):
         active_sess_id = sid
         if tools_mode:

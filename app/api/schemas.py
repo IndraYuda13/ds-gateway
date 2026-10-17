@@ -3,7 +3,8 @@ from pydantic import BaseModel, Field
 
 class MessageItem(BaseModel):
     role: str
-    content: Optional[str] = None
+    # str for plain text, or a list of content parts (text + image_url) for vision
+    content: Optional[Any] = None
     tool_calls: Optional[List[Dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
     name: Optional[str] = None
