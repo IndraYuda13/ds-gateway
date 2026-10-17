@@ -94,7 +94,8 @@ class DeepSeekUpstreamClient:
         conv_id: str,
         thinking_enabled: bool = False,
         search_enabled: bool = False,
-        force_new_session: bool = False
+        force_new_session: bool = False,
+        inject_prefix: str = ""
     ) -> Generator[Tuple[str, str, str, Optional[int]], None, None]:
         """
         Yields (fragment_type, token_str, session_id, response_message_id)
@@ -106,6 +107,12 @@ class DeepSeekUpstreamClient:
             delete_fn=self.delete_session,
             force_new=force_new_session
         )
+
+        # Inject system/tool context only on fresh conversations (no parent yet),
+        # so sticky sessions do not accumulate duplicate instructions.
+        base_prompt = prompt
+        if inject_prefix and not active_parent:
+            prompt = f"{inject_prefix}\n\n[User message]\n{base_prompt}"
 
         # Solve anti-bot PoW + get leim token
         leim_val = self.get_hif_leim()
@@ -141,11 +148,12 @@ class DeepSeekUpstreamClient:
             if e.code in (400, 404) and not force_new_session:
                 print(f"[UpstreamClient] Session {active_sid} error HTTP {e.code}. Auto-healing with new session...")
                 yield from self.stream_completion(
-                    prompt=prompt,
+                    prompt=base_prompt,
                     conv_id=conv_id,
                     thinking_enabled=thinking_enabled,
                     search_enabled=search_enabled,
-                    force_new_session=True
+                    force_new_session=True,
+                    inject_prefix=inject_prefix
                 )
                 return
             raise

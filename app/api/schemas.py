@@ -3,7 +3,10 @@ from pydantic import BaseModel, Field
 
 class MessageItem(BaseModel):
     role: str
-    content: str
+    content: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
+    tool_call_id: Optional[str] = None
+    name: Optional[str] = None
 
 class ChatCompletionRequest(BaseModel):
     model: Optional[str] = "deepseek-chat"
@@ -16,6 +19,10 @@ class ChatCompletionRequest(BaseModel):
     user: Optional[str] = None
     temperature: Optional[float] = 1.0
     max_tokens: Optional[int] = None
+    tools: Optional[List[Dict[str, Any]]] = None
+    tool_choice: Optional[Any] = None
+    parallel_tool_calls: Optional[bool] = None
+    functions: Optional[List[Dict[str, Any]]] = None  # legacy function-calling format
 
 class SimpleChatRequest(BaseModel):
     prompt: str
@@ -28,8 +35,9 @@ class SimpleChatRequest(BaseModel):
 
 class ChatMessage(BaseModel):
     role: str
-    content: str
+    content: Optional[str] = None
     reasoning_content: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
 
 class ChoiceItem(BaseModel):
     index: int = 0

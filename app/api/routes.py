@@ -13,6 +13,7 @@ from app.api.schemas import (
     ChatCompletionResponse,
     SimpleChatRequest
 )
+from app.core.tools import build_tool_instructions, parse_tool_calls
 
 router = APIRouter()
 
@@ -25,6 +26,43 @@ def authenticate(authorization: Optional[str] = None) -> str:
         if bearer and bearer not in ("lemon", "default", "sk-123", "none", PROXY_API_KEY):
             token = bearer
     return token
+
+def build_last_prompt(req: ChatCompletionRequest) -> str:
+    """Build the upstream prompt from the last message (role-aware)."""
+    if not req.messages:
+        return ""
+    last = req.messages[-1]
+    role = (last.role or "user").lower()
+    content = last.content or ""
+    if role == "tool":
+        label = last.name or last.tool_call_id or "tool"
+        return f"[Tool result for {label}]:\n{content}"
+    if role == "assistant" and last.tool_calls:
+        parts = [content] if content else []
+        for tc in last.tool_calls:
+            fn = (tc or {}).get("function") or {}
+            parts.append(json.dumps(
+                {"name": fn.get("name", ""), "arguments": fn.get("arguments", "")},
+                ensure_ascii=False,
+            ))
+        return "[Assistant tool call]:\n" + "\n".join(parts)
+    return content
+
+
+def build_system_prefix(req: ChatCompletionRequest) -> str:
+    """System messages + tool instructions; injected on fresh sessions only."""
+    parts = []
+    sys_text = "\n\n".join(
+        (m.content or "") for m in req.messages
+        if m.role == "system" and m.content
+    ).strip()
+    if sys_text:
+        parts.append("[System instructions]\n" + sys_text)
+    tool_text = build_tool_instructions(req.tools, req.functions, req.tool_choice)
+    if tool_text:
+        parts.append(tool_text)
+    return "\n\n".join(parts)
+
 
 @router.get("/health")
 @router.get("/")
@@ -129,39 +167,57 @@ def sse_event_stream(req: ChatCompletionRequest, token: str, force_new: bool = F
         explicit_session_id=req.session_id
     )
 
-    # In continuous conversation, prompt is the latest user turn
-    prompt = req.messages[-1].content
+    prompt = build_last_prompt(req)
+    system_prefix = build_system_prefix(req)
 
+    # When tools are declared, buffer the stream so tool-call blocks can be
+    # parsed and emitted as structured tool_calls deltas at the end.
+    tools_mode = bool(req.tools or req.functions)
+    think_buf, content_buf = [], []
     active_sess_id = None
+
+    def _chunk(delta, finish_reason=None):
+        return {
+            "id": chat_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": req.model,
+            "session_id": active_sess_id,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]
+        }
 
     for frag_type, tok, sid, resp_id in client.stream_completion(
         prompt=prompt,
         conv_id=conv_id,
         thinking_enabled=thinking_enabled,
         search_enabled=bool(req.search),
-        force_new_session=force_new
+        force_new_session=force_new,
+        inject_prefix=system_prefix
     ):
         active_sess_id = sid
+        if tools_mode:
+            (think_buf if frag_type == "THINK" else content_buf).append(tok)
+            continue
         delta = {"reasoning_content": tok} if frag_type == "THINK" else {"content": tok}
-        chunk_data = {
-            "id": chat_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": req.model,
-            "session_id": active_sess_id,
-            "choices": [{"index": 0, "delta": delta, "finish_reason": None}]
-        }
-        yield f"data: {json.dumps(chunk_data, ensure_ascii=False)}\n\n"
+        yield f"data: {json.dumps(_chunk(delta), ensure_ascii=False)}\n\n"
 
-    final_chunk = {
-        "id": chat_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": req.model,
-        "session_id": active_sess_id,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]
-    }
-    yield f"data: {json.dumps(final_chunk)}\n\n"
+    finish_reason = "stop"
+    if tools_mode:
+        reasoning_str = "".join(think_buf)
+        cleaned, tool_calls = parse_tool_calls("".join(content_buf))
+        if reasoning_str:
+            d = _chunk({"reasoning_content": reasoning_str})
+            yield f"data: {json.dumps(d, ensure_ascii=False)}\n\n"
+        if tool_calls:
+            d = _chunk({"tool_calls": tool_calls})
+            yield f"data: {json.dumps(d, ensure_ascii=False)}\n\n"
+            finish_reason = "tool_calls"
+        elif cleaned:
+            d = _chunk({"content": cleaned})
+            yield f"data: {json.dumps(d, ensure_ascii=False)}\n\n"
+
+    d = _chunk({}, finish_reason)
+    yield f"data: {json.dumps(d)}\n\n"
     yield "data: [DONE]\n\n"
 
 @router.post("/v1/chat/completions")
@@ -191,6 +247,7 @@ def chat_completions(
     # Non-streaming aggregation
     thinking_buf = []
     content_buf = []
+    tool_buf = []
     created = int(time.time())
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     active_sid = None
@@ -205,15 +262,23 @@ def chat_completions(
                     thinking_buf.append(delta["reasoning_content"])
                 if "content" in delta:
                     content_buf.append(delta["content"])
+                if "tool_calls" in delta:
+                    tool_buf.extend(delta["tool_calls"])
             except:
                 pass
 
     content_str = "".join(content_buf)
     reasoning_str = "".join(thinking_buf) if thinking_buf else None
 
-    msg = {"role": "assistant", "content": content_str}
+    # Catch spontaneous tool-call blocks even when tools were not declared
+    if not tool_buf:
+        content_str, tool_buf = parse_tool_calls(content_str)
+
+    msg = {"role": "assistant", "content": content_str if content_str else None}
     if reasoning_str:
         msg["reasoning_content"] = reasoning_str
+    if tool_buf:
+        msg["tool_calls"] = tool_buf
 
     return {
         "id": chat_id,
@@ -225,13 +290,13 @@ def chat_completions(
             {
                 "index": 0,
                 "message": msg,
-                "finish_reason": "stop"
+                "finish_reason": "tool_calls" if tool_buf else "stop"
             }
         ],
         "usage": {
             "prompt_tokens": 0,
-            "completion_tokens": len(content_str),
-            "total_tokens": len(content_str)
+            "completion_tokens": len(content_str or ""),
+            "total_tokens": len(content_str or "")
         }
     }
 
