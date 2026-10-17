@@ -191,7 +191,15 @@ def sse_event_stream(req: ChatCompletionRequest, token: str, force_new: bool = F
 
     # When tools are declared, buffer the stream so tool-call blocks can be
     # parsed and emitted as structured tool_calls deltas at the end.
+    # Also enable when the message history shows an agent loop (tool results
+    # or prior assistant tool_calls): clients often omit `tools` on follow-up
+    # turns, but the model still holds the protocol from session context.
     tools_mode = bool(req.tools or req.functions)
+    if not tools_mode:
+        for m in req.messages:
+            if (m.role or "").lower() == "tool" or m.tool_calls:
+                tools_mode = True
+                break
     think_buf, content_buf = [], []
     active_sess_id = None
 
@@ -225,6 +233,12 @@ def sse_event_stream(req: ChatCompletionRequest, token: str, force_new: bool = F
     if tools_mode:
         reasoning_str = "".join(think_buf)
         cleaned, tool_calls = parse_tool_calls("".join(content_buf))
+        if not tool_calls and reasoning_str:
+            # model sometimes emits the tool block inside the thinking stream
+            r_cleaned, r_calls = parse_tool_calls(reasoning_str)
+            if r_calls:
+                tool_calls = r_calls
+                reasoning_str = r_cleaned
         if reasoning_str:
             d = _chunk({"reasoning_content": reasoning_str})
             yield f"data: {json.dumps(d, ensure_ascii=False)}\n\n"

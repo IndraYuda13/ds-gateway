@@ -18,6 +18,9 @@ import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 BAR = "\uff5c"  # fullwidth vertical bar used by the DSML format
+# The model emits the bar characters inconsistently (1 or 2 per side, and
+# sometimes ASCII pipes), so every parser below accepts one-or-more bars.
+_BARS = "[" + BAR + "|]+"
 
 TAG_CALLS_OPEN = "<" + BAR * 2 + "DSML" + BAR * 2 + " calls>"
 TAG_CALLS_CLOSE = "</" + BAR * 2 + "DSML" + BAR * 2 + " calls>"
@@ -27,11 +30,17 @@ TAG_PARAM_OPEN = "<" + BAR * 2 + "DSML" + BAR * 2 + " parameter "
 TAG_PARAM_CLOSE = "</" + BAR * 2 + "DSML" + BAR * 2 + " parameter>"
 
 DSML_INVOKE_RE = re.compile(
-    re.escape(TAG_INVOKE_OPEN) + r'name="([^"]+)"[^>]*>(.*?)' + re.escape(TAG_INVOKE_CLOSE),
+    "<" + _BARS + r"\s*DSML\s*" + _BARS + r"\s+invoke\s+name=\"([^\"]+)\"[^>]*>(.*?)"
+    + "</" + _BARS + r"\s*DSML\s*" + _BARS + r"\s*invoke\s*>",
     re.DOTALL,
 )
 DSML_PARAM_RE = re.compile(
-    re.escape(TAG_PARAM_OPEN) + r'name="([^"]+)"[^>]*>(.*?)' + re.escape(TAG_PARAM_CLOSE),
+    "<" + _BARS + r"\s*DSML\s*" + _BARS + r"\s+parameter\s+name=\"([^\"]+)\"[^>]*>(.*?)"
+    + "</" + _BARS + r"\s*DSML\s*" + _BARS + r"\s*parameter\s*>",
+    re.DOTALL,
+)
+DSML_CALLS_RE = re.compile(
+    "<" + _BARS + r"\s*DSML\s*" + _BARS + r"\s+calls\s*>.*?</" + _BARS + r"\s*DSML\s*" + _BARS + r"\s*calls\s*>",
     re.DOTALL,
 )
 
@@ -165,14 +174,8 @@ def parse_tool_calls(content: str) -> Tuple[str, Optional[List[Dict[str, Any]]]]
     if not calls:
         return content, None
 
-    cleaned = content
-    if TAG_CALLS_OPEN in cleaned:
-        cleaned = re.sub(
-            re.escape(TAG_CALLS_OPEN) + r".*?" + re.escape(TAG_CALLS_CLOSE),
-            "",
-            cleaned,
-            flags=re.DOTALL,
-        ).strip()
+    cleaned = DSML_CALLS_RE.sub("", content)
+    cleaned = DSML_INVOKE_RE.sub("", cleaned)  # stray invokes without wrapper
     cleaned = JSON_BLOCK_RE.sub("", cleaned).strip()
     cleaned = re.sub(r"\n{3,}", "\n\n", cleaned).strip()
     return cleaned, calls
