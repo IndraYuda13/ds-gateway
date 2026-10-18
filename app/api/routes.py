@@ -13,7 +13,12 @@ from app.api.schemas import (
     ChatCompletionResponse,
     SimpleChatRequest
 )
-from app.core.tools import build_tool_instructions, parse_tool_calls
+from app.core.tools import (
+    build_tool_instructions,
+    parse_tool_calls,
+    infer_fallback_name,
+    strip_dsml_region,
+)
 from app.core.vision import extract_images
 
 router = APIRouter()
@@ -232,13 +237,22 @@ def sse_event_stream(req: ChatCompletionRequest, token: str, force_new: bool = F
     finish_reason = "stop"
     if tools_mode:
         reasoning_str = "".join(think_buf)
-        cleaned, tool_calls = parse_tool_calls("".join(content_buf))
+        content_str = "".join(content_buf)
+        # Degraded emissions (e.g. the invoke tag lost on long payloads) are
+        # recovered by inferring the tool from declared schemas or the last
+        # tool used in this conversation.
+        fallback = infer_fallback_name(content_str, req.tools, req.functions, msgs_dict)
+        cleaned, tool_calls = parse_tool_calls(content_str, fallback_name=fallback)
         if not tool_calls and reasoning_str:
-            # model sometimes emits the tool block inside the thinking stream
-            r_cleaned, r_calls = parse_tool_calls(reasoning_str)
-            if r_calls:
-                tool_calls = r_calls
-                reasoning_str = r_cleaned
+            # block split across the THINK -> RESPONSE boundary
+            fb2 = infer_fallback_name(reasoning_str + "\n" + content_str,
+                                      req.tools, req.functions, msgs_dict)
+            _, c_calls = parse_tool_calls(reasoning_str + "\n" + content_str,
+                                          fallback_name=fb2)
+            if c_calls:
+                tool_calls = c_calls
+                cleaned = ""
+                reasoning_str = strip_dsml_region(reasoning_str)
         if reasoning_str:
             d = _chunk({"reasoning_content": reasoning_str})
             yield f"data: {json.dumps(d, ensure_ascii=False)}\n\n"
@@ -306,7 +320,9 @@ def chat_completions(
 
     # Catch spontaneous tool-call blocks even when tools were not declared
     if not tool_buf:
-        content_str, tool_buf = parse_tool_calls(content_str)
+        fb = infer_fallback_name(content_str, req.tools, req.functions,
+                                 [m.dict() for m in req.messages])
+        content_str, tool_buf = parse_tool_calls(content_str, fallback_name=fb)
 
     msg = {"role": "assistant", "content": content_str if content_str else None}
     if reasoning_str:
