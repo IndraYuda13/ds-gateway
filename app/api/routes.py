@@ -20,6 +20,7 @@ from app.core.tools import (
     infer_fallback_name,
     strip_dsml_region,
 )
+from app.core.tokens import estimate_text
 from app.core.vision import extract_images
 
 router = APIRouter()
@@ -72,6 +73,19 @@ def build_messages_prompt(msgs) -> str:
     chunks = [_format_msg(m) for m in msgs]
     chunks = [c for c in chunks if str(c).strip()]
     return "\n\n".join(chunks) if chunks else ""
+
+
+def estimate_request_tokens(req: ChatCompletionRequest) -> int:
+    """OpenAI-convention prompt estimate: all request messages + tool
+    schemas, plus per-message framing overhead."""
+    total = 0
+    for m in req.messages:
+        total += estimate_text(_format_msg(m)) + 4
+    if req.tools:
+        total += estimate_text(json.dumps(req.tools, ensure_ascii=False))
+    if req.functions:
+        total += estimate_text(json.dumps(req.functions, ensure_ascii=False))
+    return total
 
 
 def build_system_prefix(req: ChatCompletionRequest) -> str:
@@ -284,6 +298,7 @@ def sse_event_stream(req: ChatCompletionRequest, token: str, force_new: bool = F
                 tools_mode = True
                 break
     think_buf, content_buf = [], []
+    out_parts: List[str] = []
     active_sess_id = None
 
     def _chunk(delta, finish_reason=None):
@@ -310,9 +325,11 @@ def sse_event_stream(req: ChatCompletionRequest, token: str, force_new: bool = F
             (think_buf if frag_type == "THINK" else content_buf).append(tok)
             continue
         delta = {"reasoning_content": tok} if frag_type == "THINK" else {"content": tok}
+        out_parts.append(tok)
         yield f"data: {json.dumps(_chunk(delta), ensure_ascii=False)}\n\n"
 
     finish_reason = "stop"
+    reasoning_str, cleaned, tool_calls = "", "", None
     if tools_mode:
         reasoning_str = "".join(think_buf)
         content_str = "".join(content_buf)
@@ -348,6 +365,25 @@ def sse_event_stream(req: ChatCompletionRequest, token: str, force_new: bool = F
 
     d = _chunk({}, finish_reason)
     yield f"data: {json.dumps(d)}\n\n"
+
+    if req.stream_options and req.stream_options.get("include_usage"):
+        if tools_mode:
+            comp_text = reasoning_str + cleaned + (json.dumps(tool_calls) if tool_calls else "")
+        else:
+            comp_text = "".join(out_parts)
+        pt_est = estimate_request_tokens(req)
+        ct_est = estimate_text(comp_text)
+        usage_evt = {
+            "id": chat_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": req.model,
+            "choices": [],
+            "usage": {"prompt_tokens": pt_est, "completion_tokens": ct_est,
+                      "total_tokens": pt_est + ct_est, "estimated": True}
+        }
+        yield f"data: {json.dumps(usage_evt, ensure_ascii=False)}\n\n"
+
     yield "data: [DONE]\n\n"
 
 @router.post("/v1/chat/completions")
@@ -412,6 +448,11 @@ def chat_completions(
     if tool_buf:
         msg["tool_calls"] = tool_buf
 
+    pt_est = estimate_request_tokens(req)
+    ct_est = (estimate_text(content_str)
+              + estimate_text(reasoning_str or "")
+              + (estimate_text(json.dumps(tool_buf, ensure_ascii=False)) if tool_buf else 0))
+
     return {
         "id": chat_id,
         "object": "chat.completion",
@@ -426,9 +467,10 @@ def chat_completions(
             }
         ],
         "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": len(content_str or ""),
-            "total_tokens": len(content_str or "")
+            "prompt_tokens": pt_est,
+            "completion_tokens": ct_est,
+            "total_tokens": pt_est + ct_est,
+            "estimated": True
         }
     }
 

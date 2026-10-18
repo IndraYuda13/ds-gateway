@@ -25,6 +25,7 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: Optional[Any] = None
     parallel_tool_calls: Optional[bool] = None
     functions: Optional[List[Dict[str, Any]]] = None  # legacy function-calling format
+    stream_options: Optional[Dict[str, Any]] = None   # OpenAI-style {include_usage}
 
     @field_validator("thinking", mode="before")
     @classmethod
@@ -66,6 +67,8 @@ class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    # upstream DeepSeek web gives no billed counts; these are gateway estimates
+    estimated: Optional[bool] = None
 
 class ChatCompletionResponse(BaseModel):
     id: str
