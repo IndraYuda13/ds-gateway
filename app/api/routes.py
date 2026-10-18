@@ -1,12 +1,15 @@
 import time
 import uuid
+import os
 from typing import List
 import json
-from typing import Optional, Any
+from typing import Optional, Any, Dict
 from fastapi import APIRouter, Header, HTTPException
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from app.config import DEFAULT_TOKEN, PROXY_API_KEY
+from app.api.catalog import list_models_response
+
 from app.core.session import smart_pool
 from app.core.client import DeepSeekUpstreamClient
 from app.api.schemas import (
@@ -142,27 +145,8 @@ def health(authorization: Optional[str] = Header(default=None)):
 
 @router.get("/v1/models")
 def list_models():
-    models = [
-        {"id": "ds-chat", "root": "ds-chat"},
-        {"id": "ds-reasoner", "root": "ds-reasoner"},
-        {"id": "deepseek-chat", "root": "deepseek-chat"},
-        {"id": "deepseek-reasoner", "root": "deepseek-reasoner"},
-    ]
-    return {
-        "object": "list",
-        "data": [
-            {
-                "id": m["id"],
-                "object": "model",
-                "created": 1700000000,
-                "owned_by": "deepseek",
-                "permission": [],
-                "root": m["root"],
-                "parent": None
-            }
-            for m in models
-        ]
-    }
+    return list_models_response(["ds-chat", "ds-reasoner", "deepseek-chat", "deepseek-reasoner"])
+
 
 @router.post("/v1/chat/sessions/new")
 @router.post("/chat/new")
