@@ -1,5 +1,6 @@
 import time
 import uuid
+from typing import List
 import json
 from typing import Optional, Any
 from fastapi import APIRouter, Header, HTTPException
@@ -33,13 +34,10 @@ def authenticate(authorization: Optional[str] = None) -> str:
             token = bearer
     return token
 
-def build_last_prompt(req: ChatCompletionRequest) -> str:
-    """Build the upstream prompt from the last message (role-aware)."""
-    if not req.messages:
-        return ""
-    last = req.messages[-1]
-    role = (last.role or "user").lower()
-    content = last.content or ""
+def _format_msg(m) -> str:
+    """Render one client message into the upstream prompt form (role-aware)."""
+    role = (m.role or "user").lower()
+    content = m.content or ""
     if isinstance(content, list):
         # vision-style content parts: keep the text parts for the prompt
         texts = [
@@ -48,11 +46,11 @@ def build_last_prompt(req: ChatCompletionRequest) -> str:
         ]
         content = "\n".join(t for t in texts if t).strip()
     if role == "tool":
-        label = last.name or last.tool_call_id or "tool"
+        label = m.name or m.tool_call_id or "tool"
         return f"[Tool result for {label}]:\n{content}"
-    if role == "assistant" and last.tool_calls:
+    if role == "assistant" and m.tool_calls:
         parts = [content] if content else []
-        for tc in last.tool_calls:
+        for tc in m.tool_calls:
             fn = (tc or {}).get("function") or {}
             parts.append(json.dumps(
                 {"name": fn.get("name", ""), "arguments": fn.get("arguments", "")},
@@ -60,6 +58,20 @@ def build_last_prompt(req: ChatCompletionRequest) -> str:
             ))
         return "[Assistant tool call]:\n" + "\n".join(parts)
     return content
+
+def build_last_prompt(req: ChatCompletionRequest) -> str:
+    """Build the upstream prompt from the last message (role-aware)."""
+    if not req.messages:
+        return ""
+    return _format_msg(req.messages[-1])
+
+def build_messages_prompt(msgs) -> str:
+    """Render a delta of messages (e.g. several parallel tool results) as
+    one upstream turn. Continuations must deliver EVERY message the
+    upstream conversation has not seen yet — not just the final one."""
+    chunks = [_format_msg(m) for m in msgs]
+    chunks = [c for c in chunks if str(c).strip()]
+    return "\n\n".join(chunks) if chunks else ""
 
 
 def build_system_prefix(req: ChatCompletionRequest) -> str:
@@ -161,6 +173,55 @@ def new_session(
         "session_id": new_sid
     }
 
+def build_transcript_prompt(req: ChatCompletionRequest, max_chars: int = 14000) -> str:
+    """Render the whole client history into one prompt.
+
+    Used when a request opens a FRESH upstream conversation but carries
+    existing history (context compaction, edited/replayed transcript,
+    mid-session fork): the new DeepSeek conversation otherwise starts
+    blank, so the replayed history must be handed to it in full.
+    """
+    lines: List[str] = []
+    for m in req.messages:
+        role = (m.role or "user").lower()
+        if role == "system":
+            continue
+        content = m.content or ""
+        if isinstance(content, list):
+            texts = [
+                p.get("text", "") for p in content
+                if isinstance(p, dict) and p.get("type") == "text"
+            ]
+            content = "\n".join(t for t in texts if t).strip()
+        extra = ""
+        if m.tool_calls:
+            names = [
+                (tc or {}).get("function", {}).get("name", "?")
+                for tc in m.tool_calls
+            ]
+            extra = f" [called tools: {', '.join(names)}]"
+        if not str(content).strip() and not extra:
+            continue
+        if role == "tool":
+            label = m.name or m.tool_call_id or "tool"
+            lines.append(f"[Tool result {label}]: {str(content)[:1500]}")
+        elif role == "assistant":
+            lines.append(f"Assistant: {str(content)[:1500]}{extra}")
+        else:
+            lines.append(f"User: {str(content)[:1500]}")
+    joined = "\n".join(lines)
+    if len(joined) > max_chars:
+        joined = joined[-max_chars:]
+        nl = joined.find("\n")
+        if nl != -1:
+            joined = joined[nl + 1:]
+    return (
+        "Below is a conversation between a User and the Assistant that "
+        "already happened. Continue as the Assistant from exactly where "
+        "it left off and respond to the last message. Do not restart the "
+        "conversation.\n\n" + joined
+    )
+
 def sse_event_stream(req: ChatCompletionRequest, token: str, force_new: bool = False):
     created = int(time.time())
     chat_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -172,15 +233,32 @@ def sse_event_stream(req: ChatCompletionRequest, token: str, force_new: bool = F
     elif req.model and ("reasoner" in req.model.lower() or "r1" in req.model.lower()):
         thinking_enabled = True
 
-    # Compute conversation ID from messages/user/session_id
+    # Compute conversation ID from messages/user/session_id.
+    # Continuation requires the incoming history to exactly extend the
+    # pooled conversation's last-seen history (prefix-chain); a repeated
+    # opening line from a fresh client session no longer inherits an old
+    # upstream conversation.
     msgs_dict = [m.dict() for m in req.messages]
-    conv_id = smart_pool.compute_conv_id(
-        messages=msgs_dict,
+    conv_id, continued = smart_pool.route_full(
+        msgs_dict,
         user=req.user,
-        explicit_session_id=req.session_id
+        explicit_session_id=req.session_id,
+        force_new=force_new
     )
 
-    prompt = build_last_prompt(req)
+    # Fresh conversation that arrives with existing history (compaction,
+    # edited/replayed transcript): the blank upstream conversation must be
+    # seeded with the whole replay, not just the final message.
+    # Continued conversation: send only the messages the upstream has not
+    # seen yet (a parallel tool round adds several tool results at once).
+    if continued:
+        d0 = smart_pool.depth_of(conv_id)
+        delta = req.messages[d0:]
+        prompt = build_messages_prompt(delta) if delta else build_last_prompt(req)
+    elif len(req.messages) > 2:
+        prompt = build_transcript_prompt(req)
+    else:
+        prompt = build_last_prompt(req)
     system_prefix = build_system_prefix(req)
 
     # Vision: upload images from the last user message, get ref_file_ids
@@ -263,6 +341,10 @@ def sse_event_stream(req: ChatCompletionRequest, token: str, force_new: bool = F
         elif cleaned:
             d = _chunk({"content": cleaned})
             yield f"data: {json.dumps(d, ensure_ascii=False)}\n\n"
+
+    # Response fully generated: anchor the conversation at this history so
+    # the next turn (which replays it as a prefix) continues this conversation.
+    smart_pool.note(conv_id, msgs_dict)
 
     d = _chunk({}, finish_reason)
     yield f"data: {json.dumps(d)}\n\n"

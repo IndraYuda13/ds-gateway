@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import uuid
 import hashlib
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable, Tuple
@@ -18,7 +19,9 @@ class SessionEntry:
         parent_message_id: Optional[int] = None,
         created_at: Optional[float] = None,
         last_active: Optional[float] = None,
-        turn_count: int = 1
+        turn_count: int = 1,
+        last_chain_hash: str = "",
+        last_depth: int = 0
     ):
         self.session_id = session_id
         self.conv_id = conv_id
@@ -26,6 +29,16 @@ class SessionEntry:
         self.created_at = created_at or time.time()
         self.last_active = last_active or time.time()
         self.turn_count = turn_count
+        # Prefix-chain hash of the most recent full `messages` array this
+        # conversation was seen with. Continuation is only granted when a
+        # client request's message history *equals or extends exactly* that
+        # recorded history — never from a lone first-message fingerprint
+        # (which let a fresh /new session inherit an old conversation's
+        # upstream context when the opening line repeated).
+        self.last_chain_hash = last_chain_hash
+        # Number of client messages already delivered into this upstream
+        # conversation; the next continued turn only sends the delta.
+        self.last_depth = last_depth
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -34,7 +47,9 @@ class SessionEntry:
             "parent_message_id": self.parent_message_id,
             "created_at": self.created_at,
             "last_active": self.last_active,
-            "turn_count": self.turn_count
+            "turn_count": self.turn_count,
+            "last_chain_hash": self.last_chain_hash,
+            "last_depth": self.last_depth
         }
 
     @classmethod
@@ -45,7 +60,9 @@ class SessionEntry:
             parent_message_id=d.get("parent_message_id"),
             created_at=d.get("created_at"),
             last_active=d.get("last_active"),
-            turn_count=d.get("turn_count", 1)
+            turn_count=d.get("turn_count", 1),
+            last_chain_hash=d.get("last_chain_hash", ""),
+            last_depth=d.get("last_depth", 0)
         )
 
 
@@ -117,6 +134,128 @@ class SmartSessionPool:
 
         return f"conv_anon_{int(time.time())}"
 
+    # ------------------------------------------------------------------
+    # Prefix-chain conversation binding (anti cross-session contamination)
+    # ------------------------------------------------------------------
+    RETRY_WINDOW = 60          # seconds a FULL history match may continue
+    FULL_TRUST_DEPTH = 6       # long replays are real retries, always continue
+
+    @staticmethod
+    def _hash_msg(m: Dict[str, Any]) -> bytes:
+        blob = json.dumps(m, sort_keys=True, ensure_ascii=False, default=str)
+        return hashlib.sha256(blob.encode("utf-8")).digest()
+
+    def chain_hashes(self, messages: List[Dict[str, Any]]) -> Dict[int, str]:
+        """Rolling hash over message prefixes: depth -> chain hash.
+
+        chain[d] commits to the exact ordered content of messages[:d],
+        so equality means byte-identical history (collision-resistant).
+        """
+        cur = b"\x00ds-chain"
+        out: Dict[int, str] = {}
+        for i, m in enumerate(messages, 1):
+            cur = hashlib.sha256(cur + self._hash_msg(m)).digest()
+            out[i] = cur.hex()
+        return out
+
+    def find_continuation(self, messages: List[Dict[str, Any]]) -> Optional[str]:
+        """conv_id of a pooled conversation this request genuinely extends.
+
+        A conversation continues only when its last-seen full message list
+        is an exact prefix of the incoming list. An identical full list is
+        accepted as a retry when the conversation was active within
+        RETRY_WINDOW, or when the history is deep (long agent transcripts
+        repeating by chance is not realistic). A shallow identical opener
+        (e.g. a fresh /new starting with "hai") does NOT continue — it
+        gets its own conversation instead.
+        """
+        n = len(messages)
+        if n == 0:
+            return None
+        chain = self.chain_hashes(messages)
+        by_hash = {v: d for d, v in chain.items()}
+        now = time.time()
+        best_depth, best_key = 0, None
+        for k, e in self.pool.items():
+            lh = e.last_chain_hash
+            if not lh:
+                continue
+            depth = by_hash.get(lh)
+            if depth is None:
+                continue
+            if depth < n:
+                ok = True                       # exact history extended
+            elif n > self.FULL_TRUST_DEPTH:
+                ok = True                       # deep identical replay = retry
+            else:
+                ok = (now - e.last_active) <= self.RETRY_WINDOW  # fresh retry
+            if not ok:
+                continue
+            if (depth > best_depth) or (
+                depth == best_depth and best_key is not None
+                and e.turn_count > self.pool[best_key].turn_count
+            ):
+                best_depth, best_key = depth, k
+        return best_key
+
+    def route(
+        self,
+        messages: List[Dict[str, Any]],
+        user: Optional[str] = None,
+        explicit_session_id: Optional[str] = None,
+        force_new: bool = False
+    ) -> str:
+        return self.route_full(messages, user, explicit_session_id, force_new)[0]
+
+    def route_full(
+        self,
+        messages: List[Dict[str, Any]],
+        user: Optional[str] = None,
+        explicit_session_id: Optional[str] = None,
+        force_new: bool = False
+    ) -> Tuple[str, bool]:
+        """(conv_id, continued) for a request.
+
+        continued=True means this request chains onto an existing pooled
+        conversation (real next turn or a genuine retry). continued=False
+        means a brand-new conversation instance: the client is either at
+        its opening turn or has diverging history (edited transcript,
+        context compaction) — the caller should hand the whole replay to
+        the fresh upstream conversation instead of only the last message.
+        """
+        if explicit_session_id:
+            cid = f"custom_{explicit_session_id.strip()}"
+            return cid, cid in self.pool
+        if user and str(user).strip() not in ("", "none", "null"):
+            cid = f"user_{str(user).strip()}"
+            return cid, cid in self.pool
+        if not force_new:
+            cont = self.find_continuation(messages)
+            if cont:
+                return cont, True
+        chain = self.chain_hashes(messages)
+        if chain:
+            # unique key per conversation INSTANCE: identical openers from
+            # fresh client sessions must NOT map onto a pooled entry by id;
+            # continuation happens only through find_continuation's chain
+            # matching, never by content-equal ids.
+            return f"conv_{chain[len(messages)][:12]}_{uuid.uuid4().hex[:4]}", False
+        return f"conv_anon_{int(time.time())}", False
+
+    def note(self, conv_id: str, messages: List[Dict[str, Any]]) -> None:
+        """Record that this conversation has now been seen with `messages`."""
+        e = self.pool.get(conv_id)
+        if e is None or not messages:
+            return
+        e.last_chain_hash = self.chain_hashes(messages).get(len(messages), "")
+        e.last_depth = len(messages)
+        e.last_active = time.time()
+        self.save()
+
+    def depth_of(self, conv_id: str) -> int:
+        e = self.pool.get(conv_id)
+        return e.last_depth if e else 0
+
     def acquire(
         self,
         conv_id: str,
@@ -137,6 +276,15 @@ class SmartSessionPool:
             entry.turn_count += 1
             self.save()
             return entry.session_id, entry.parent_message_id
+
+        if force_new and conv_id in self.pool:
+            # replacing a bound conversation: delete its upstream session
+            # so no orphaned conversation remains on the account
+            old = self.pool.pop(conv_id)
+            try:
+                delete_fn(old.session_id)
+            except Exception:
+                pass
 
         # If pool is at capacity, evict least recently used (LRU)
         if len(self.pool) >= self.max_size:
